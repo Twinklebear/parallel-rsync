@@ -79,6 +79,29 @@ def make_file_path(target, file_path):
     else:
         return os.path.join(target, file_path)
 
+class ActiveTransfer:
+    def __init__(self, from_path, to_path):
+        print(f"Will transfer {from_path} to {to_path}")
+
+        self.pipe_read, self.pipe_write = os.pipe()
+        self.proc = subprocess.Popen(["rsync", "-avsP", from_path, to_path], stdout=self.pipe_write, stderr=subprocess.STDOUT)
+
+        self.stdout = os.fdopen(self.pipe_read)
+
+    def progress(self):
+        line = self.stdout.readline()
+        if not line or "total size" in line:
+            status = self.proc.wait()
+            os.close(self.pipe_read)
+            os.close(self.pipe_write)
+            return (100, None)
+        
+        print(line)
+        m = re.search("(\d+)\%", line)
+        if m:
+            return (int(m.group(1)), line)
+        return (0, None)
+
 
 files = get_file_list(sys.argv[1])
 print(f"Will transfer files: {files}")
@@ -86,8 +109,12 @@ print(f"Will transfer files: {files}")
 for f in files:
     from_path = make_file_path(sys.argv[1], f)
     to_path = os.path.dirname(make_file_path(sys.argv[2], f)) + "/"
-    print(f"Will transfer {from_path} to {to_path}")
-    out = subprocess.run(["rsync", "-avsP", from_path, to_path], capture_output=True)
-    print(out.stdout.decode("utf8"))
-    print(out.stderr.decode("utf8"))
+
+    transfer = ActiveTransfer(from_path, to_path)
+    while True:
+        progress = transfer.progress()
+        print(f"progress = {progress[0]}: {progress[1]}")
+        if progress[0] == 100:
+            break
+
 
