@@ -6,9 +6,10 @@ import subprocess
 import re
 
 USAGE = """Usage:
-./parallel_rsync <from> <to>
+./parallel_rsync <N> <from> <to>
 
 Documentation:
+    <N>             The number of transfers to perform in parallel
     <from>, <to>    The directory to transfer from, or the output location to
                     transfer to. Either can be a local or remote path, though
                     for rsync at least one must be local. Paths are specified
@@ -83,38 +84,67 @@ class ActiveTransfer:
     def __init__(self, from_path, to_path):
         print(f"Will transfer {from_path} to {to_path}")
 
+        self.from_path = from_path
+        self.to_path = to_path
         self.pipe_read, self.pipe_write = os.pipe()
-        self.proc = subprocess.Popen(["rsync", "-avsP", from_path, to_path], stdout=self.pipe_write, stderr=subprocess.STDOUT)
+        self.proc = subprocess.Popen(["rsync", "-avsP", self.from_path, self.to_path],
+                stdout=self.pipe_write, stderr=subprocess.STDOUT)
 
         self.stdout = os.fdopen(self.pipe_read)
+        self.complete = False
 
     def progress(self):
+        if self.complete:
+            return (100, None)
+
         line = self.stdout.readline()
         if not line or "total size" in line:
             status = self.proc.wait()
+            self.complete = True
             os.close(self.pipe_read)
             os.close(self.pipe_write)
             return (100, None)
         
-        print(line)
         m = re.search("(\d+)\%", line)
         if m:
             return (int(m.group(1)), line)
         return (0, None)
 
-
-files = get_file_list(sys.argv[1])
-print(f"Will transfer files: {files}")
-
-for f in files:
-    from_path = make_file_path(sys.argv[1], f)
-    to_path = os.path.dirname(make_file_path(sys.argv[2], f)) + "/"
-
-    transfer = ActiveTransfer(from_path, to_path)
+# Monitor the progress of the current transfers,
+# returning when it's possible to enqueue another one
+def monitor_progress(n_parallel, transfers):
+    completed = 0
     while True:
-        progress = transfer.progress()
-        print(f"progress = {progress[0]}: {progress[1]}")
-        if progress[0] == 100:
+        for t in transfers:
+            progress = t.progress()
+            print(f"Transfer '{t.from_path} -> {t.to_path}: {progress[0]}%")
+            if progress[0] > 0 and progress[0] != 100:
+                print(f"\t{progress[1]}")
+            if t.complete:
+                completed += 1
+        
+        transfers = [t for t in transfers if not t.complete]
+        if len(transfers) < n_parallel:
             break
+    return (transfers, completed)
 
+n_parallel = int(sys.argv[1])
+arg_from = sys.argv[2]
+arg_to = sys.argv[3]
+
+files = get_file_list(arg_from)
+completed = 0
+transfers = []
+for f in files:
+    from_path = make_file_path(arg_from, f)
+    to_path = os.path.dirname(make_file_path(arg_to, f)) + "/"
+    transfers.append(ActiveTransfer(from_path, to_path))
+    transfers, new_completed = monitor_progress(n_parallel, transfers)
+    completed += new_completed
+    print(f"Completed {completed}/{len(files)}")
+
+while len(transfers) > 0:
+    transfers, new_completed = monitor_progress(n_parallel, transfers)
+    completed += new_completed
+    print(f"Completed {completed}/{len(files)}")
 
