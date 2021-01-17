@@ -21,31 +21,22 @@ match_rsync_file = re.compile("([d-][rwx-]+)[ ]+[0-9,]+ \d+\/\d+\/\d+ \d+\:\d+\:
 def path_is_remote(path):
     return ":" in path
 
-def get_local_file_list(local_path):
-    file_list = []
-    if os.path.isdir(local_path):
-        for path, dirs, files in os.walk(local_path):
-            for f in files:
-                filename = os.path.join(path, f)
-                file_list.append(filename)
-    else:
-        file_list.append(local_path)
+def split_target_path(path):
+    if path_is_remote(path):
+        split = path.split(":")
+        return [split[0] + ":", split[1]]
+    return ["", path]
 
-    # Change all paths to be relative to local path
-    for i in range(len(file_list)):
-        file_list[i] = os.path.relpath(file_list[i], local_path)
-    return file_list
-
-def resolve_remote_regex(remote_info):
+def resolve_regex(remote_info):
     file_list = []
     path = os.path.dirname(remote_info[1]) + "/"
-    print(path)
-    result = subprocess.run(["rsync", "-s", f"{remote_info[0]}:{path}"], capture_output=True)
+    result = subprocess.run(["rsync", "-s", f"{remote_info[0]}{path}"], capture_output=True)
     if result.stderr:
         print(f"Error listing remote path: {result.stderr.decode('utf8')}")
         return file_list
 
     # Just handling * expansion
+    print(os.path.basename(remote_info[1]))
     pattern = re.sub("\\\\\*", ".*", re.escape(os.path.basename(remote_info[1])))
     print(f"Mathing pattern {pattern}")
     match_pattern = re.compile(pattern)
@@ -56,23 +47,26 @@ def resolve_remote_regex(remote_info):
             continue
 
         if match_pattern.match(f):
-            print(f"Matched {f}")
             file_list.append(os.path.join(path, f) + "/")
     return file_list
 
-def get_remote_file_list(rem_path):
-    remote_info = rem_path.split(":")
+def get_file_list(rem_path):
+    remote_info = split_target_path(rem_path)
     remote_paths = []
+    remote_base_path = ""
     if "*" in remote_info[1]:
-        remote_paths = resolve_remote_regex(remote_info)
+        remote_paths = resolve_regex(remote_info)
     else:
-        remote_paths = [remote_info[1]]
+        remote_paths = [remote_info[1] + "/"]
+
+    remote_base_path = os.path.dirname(remote_paths[0][0:-1])
+
+    print(f"remote base path = {remote_base_path}")
     print(f"remote paths: {remote_paths}")
     file_list = []
     while len(remote_paths) > 0:
         path = remote_paths.pop(0)
-        print(f"{remote_info[0]}:{path}")
-        result = subprocess.run(["rsync", "-s", f"{remote_info[0]}:{path}"], capture_output=True)
+        result = subprocess.run(["rsync", "-s", f"{remote_info[0]}{path}"], capture_output=True)
         if result.stderr:
             print(f"Error listing remote path: {result.stderr.decode('utf8')}")
             continue
@@ -84,7 +78,6 @@ def get_remote_file_list(rem_path):
             if f == ".":
                 continue
 
-            print(f)
             if is_dir:
                 if path != f:
                     remote_paths.append(os.path.join(path, f) + "/")
@@ -94,34 +87,25 @@ def get_remote_file_list(rem_path):
                 file_list.append(os.path.join(path, f))
 
     # Change all paths to be relative to the original remote path
-    if not "*" in remote_info[1]:
-        for i in range(len(file_list)):
-            file_list[i] = os.path.relpath(file_list[i], remote_info[1])
-    print(file_list)
+    for i in range(len(file_list)):
+        file_list[i] = os.path.relpath(file_list[i], remote_base_path)
     return file_list
-
-def get_file_list(path):
-    if path_is_remote(path):
-        return get_remote_file_list(path)
-    else:
-        return get_local_file_list(path)
-
-def make_file_path(target, file_path):
-    # TODO: Needs to handle correcting things for expansion/wildcards
-    # the dir mathcing the pattern target should be used as the base dir 
-    if path_is_remote(target):
-        remote_info = target.split(":")
-        return remote_info[0] + ":" + os.path.join(remote_info[1], file_path)
-    else:
-        return os.path.join(target, file_path)
 
 class ActiveTransfer:
     def __init__(self, from_path, to_path):
-        print(f"Will transfer {from_path} to {to_path}")
-
         self.from_path = from_path
         self.to_path = to_path
+        print(f"Transfer '{from_path} -> {to_path}: starting")
+
         self.pipe_read, self.pipe_write = os.pipe()
+        if path_is_remote(self.to_path):
+            remote_info = split_target_path(self.to_path)
+            host = remote_info[0][0:-1]
+            to_dir = os.path.dirname(remote_info[1])
+            subprocess.run(["ssh", host, "mkdir", "-p", f'"{to_dir}"'])
+        else:
+            os.makedirs(os.path.dirname(self.to_path), exist_ok=True)
+
         self.proc = subprocess.Popen(["rsync", "-avsP", self.from_path, self.to_path],
                 stdout=self.pipe_write, stderr=subprocess.STDOUT)
 
@@ -152,31 +136,39 @@ def monitor_progress(n_parallel, transfers):
     while True:
         for t in transfers:
             progress = t.progress()
-            print(f"Transfer '{t.from_path} -> {t.to_path}: {progress[0]}%")
-            if progress[0] > 0 and progress[0] != 100:
-                print(f"\t{progress[1]}")
+            if progress[0] > 0:
+                print(f"Transfer '{t.from_path} -> {t.to_path}: {progress[0]}%")
+                if progress[0] != 100:
+                    print(f"\t{progress[1]}")
             if t.complete:
                 completed += 1
         
         transfers = [t for t in transfers if not t.complete]
-        if len(transfers) < n_parallel:
+        if len(transfers) < n_parallel or n_parallel <= 0:
             break
     return (transfers, completed)
 
 n_parallel = int(sys.argv[1])
 arg_from = sys.argv[2]
+if arg_from[-1] == "/":
+    arg_from = arg_from[0:-1]
 arg_to = sys.argv[3]
 
 files = get_file_list(arg_from)
 completed = 0
 transfers = []
 for f in files:
-    from_path = make_file_path(arg_from, f)
-    to_path = os.path.dirname(make_file_path(arg_to, f)) + "/"
+    remote_info = split_target_path(arg_from)
+    remote_base_path = os.path.dirname(remote_info[1][0:-1])
+    from_path = remote_info[0] + os.path.join(remote_base_path, f)
+
+    to_path = os.path.join(arg_to, f)
+
     transfers.append(ActiveTransfer(from_path, to_path))
-    transfers, new_completed = monitor_progress(n_parallel, transfers)
-    completed += new_completed
-    print(f"Completed {completed}/{len(files)}")
+    while len(transfers) == n_parallel:
+        transfers, new_completed = monitor_progress(n_parallel, transfers)
+        completed += new_completed
+        print(f"Completed {completed}/{len(files)}")
 
 while len(transfers) > 0:
     transfers, new_completed = monitor_progress(n_parallel, transfers)
