@@ -107,7 +107,7 @@ class ActiveTransfer:
             os.makedirs(os.path.dirname(self.to_path), exist_ok=True)
 
         self.proc = subprocess.Popen(["rsync", "-avsP", self.from_path, self.to_path],
-                stdout=self.pipe_write, stderr=subprocess.STDOUT)
+                stdout=self.pipe_write, stderr=subprocess.STDOUT, pass_fds=[self.pipe_write])
 
         self.stdout = os.fdopen(self.pipe_read)
         self.complete = False
@@ -121,7 +121,6 @@ class ActiveTransfer:
             status = self.proc.wait()
             self.complete = True
             os.close(self.pipe_read)
-            os.close(self.pipe_write)
             return (100, None)
         
         m = re.search("(\d+)\%", line)
