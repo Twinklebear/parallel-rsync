@@ -16,6 +16,8 @@ Documentation:
                     as they are to rsync
 """
 
+match_rsync_file = re.compile("([d-][rwx-]+)[ ]+[0-9,]+ \d+\/\d+\/\d+ \d+\:\d+\:\d+ (.*)")
+
 def path_is_remote(path):
     return ":" in path
 
@@ -34,26 +36,55 @@ def get_local_file_list(local_path):
         file_list[i] = os.path.relpath(file_list[i], local_path)
     return file_list
 
-def get_remote_file_list(rem_path):
-    match_file = re.compile("([d-][rwx-]+)[ ]+[0-9,]+ \d+\/\d+\/\d+ \d+\:\d+\:\d+ (.*)")
+def resolve_remote_regex(remote_info):
+    file_list = []
+    path = os.path.dirname(remote_info[1]) + "/"
+    print(path)
+    result = subprocess.run(["rsync", "-s", f"{remote_info[0]}:{path}"], capture_output=True)
+    if result.stderr:
+        print(f"Error listing remote path: {result.stderr.decode('utf8')}")
+        return file_list
 
+    # Just handling * expansion
+    pattern = re.sub("\\\\\*", ".*", re.escape(os.path.basename(remote_info[1])))
+    print(f"Mathing pattern {pattern}")
+    match_pattern = re.compile(pattern)
+    stdout = result.stdout.decode("utf8")
+    for m in match_rsync_file.finditer(stdout):
+        f = m.group(2)
+        if f == ".":
+            continue
+
+        if match_pattern.match(f):
+            print(f"Matched {f}")
+            file_list.append(os.path.join(path, f) + "/")
+    return file_list
+
+def get_remote_file_list(rem_path):
     remote_info = rem_path.split(":")
-    remote_paths = [remote_info[1]]
+    remote_paths = []
+    if "*" in remote_info[1]:
+        remote_paths = resolve_remote_regex(remote_info)
+    else:
+        remote_paths = [remote_info[1]]
+    print(f"remote paths: {remote_paths}")
     file_list = []
     while len(remote_paths) > 0:
         path = remote_paths.pop(0)
+        print(f"{remote_info[0]}:{path}")
         result = subprocess.run(["rsync", "-s", f"{remote_info[0]}:{path}"], capture_output=True)
         if result.stderr:
             print(f"Error listing remote path: {result.stderr.decode('utf8')}")
             continue
 
         stdout = result.stdout.decode("utf8")
-        for m in match_file.finditer(stdout):
+        for m in match_rsync_file.finditer(stdout):
             is_dir = m.group(1)[0] == "d"
             f = m.group(2)
             if f == ".":
                 continue
 
+            print(f)
             if is_dir:
                 if path != f:
                     remote_paths.append(os.path.join(path, f) + "/")
@@ -63,8 +94,10 @@ def get_remote_file_list(rem_path):
                 file_list.append(os.path.join(path, f))
 
     # Change all paths to be relative to the original remote path
-    for i in range(len(file_list)):
-        file_list[i] = os.path.relpath(file_list[i], remote_info[1])
+    if not "*" in remote_info[1]:
+        for i in range(len(file_list)):
+            file_list[i] = os.path.relpath(file_list[i], remote_info[1])
+    print(file_list)
     return file_list
 
 def get_file_list(path):
@@ -74,6 +107,8 @@ def get_file_list(path):
         return get_local_file_list(path)
 
 def make_file_path(target, file_path):
+    # TODO: Needs to handle correcting things for expansion/wildcards
+    # the dir mathcing the pattern target should be used as the base dir 
     if path_is_remote(target):
         remote_info = target.split(":")
         return remote_info[0] + ":" + os.path.join(remote_info[1], file_path)
