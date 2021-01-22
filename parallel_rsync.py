@@ -56,6 +56,9 @@ def get_file_list(rem_path):
     remote_base_path = ""
     if "*" in remote_info[1]:
         remote_paths = resolve_regex(remote_info)
+        if len(remote_paths) == 0:
+            print("The provided regex did not match any files.")
+            sys.exit(0)
     else:
         remote_paths = [remote_info[1] + "/"]
 
