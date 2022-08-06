@@ -181,6 +181,10 @@ def download_file(from_file, to_file):
         print(f"Completed {completed}/{len(files)}")
 
 if __name__ == "__main__":
+    if "-h" in sys.argv:
+        print(USAGE)
+        sys.exit(0)
+
     n_parallel = int(sys.argv[1])
 
     # If -s is passed we're reading the file names from a text file
